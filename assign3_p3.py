@@ -2,6 +2,7 @@ import os
 import json
 import argparse
 import gymnasium as gym
+import ale_py
 import numpy as np
 import random
 import torch
@@ -10,16 +11,18 @@ import torch.optim as optim
 from collections import deque
 import pickle
 import matplotlib.pyplot as plt
+import os
+os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 
 os.makedirs("checkpoints", exist_ok=True)
 os.makedirs("results", exist_ok=True)
 LOG_FILE_P3 = os.path.join("checkpoints", "log_p3.json")
 RESULTS_FILE_P3 = os.path.join("results", "plot_data_p3.pkl")
-CHECKPOINT_INTERVAL = 50
+CHECKPOINT_INTERVAL = 10
 NUM_EPISODES = 1000
-NUM_SEEDS = 50
+NUM_SEEDS = 10
 GAMMA = 0.99
-DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+DEVICE = torch.device("cpu")
 ENV_NAMES = ["Acrobot-v1", "ALE/Assault-ram-v5"]
 METHODS_P3 = ["reinforce", "actor_critic"]
 TEMP_MODES = ["fixed", "decreasing"]
