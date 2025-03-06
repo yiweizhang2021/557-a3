@@ -1,7 +1,9 @@
 import os
 import json
 import argparse
+import ale_py
 import gymnasium as gym
+gym.register_envs(ale_py)
 import numpy as np
 import random
 import torch
@@ -25,9 +27,9 @@ REPLAY_BUFFER_CAPACITY = int(1e6)
 MINI_BATCH_SIZE = 64
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 ENV_NAMES = ["Acrobot-v1", "ALE/Assault-ram-v5"]
-USE_REPLAY_OPTIONS = [False, True]
+USE_REPLAY_OPTIONS = [True, False]
 EPSILON_LIST = [1.0, 0.1, 0.01]
-LR_LIST = [1/4, 1/8, 1/16]
+LR_LIST = [0.001, 0.0001, 0.00001]
 METHODS = ["q_learning", "expected_sarsa"]
 
 class QNetwork(nn.Module):
@@ -60,10 +62,14 @@ class ReplayBuffer:
         return len(self.buffer)
 
 def preprocess_state(state, env_name):
-    if env_name=="ALE/Assault-ram-v5":
-        return np.array(state, dtype=np.float32)/255.0
-    else:
-        return np.array(state, dtype=np.float32)
+    s = np.array(state, dtype=np.float32)
+    if env_name == "ALE/Assault-ram-v5":
+        s = s / 255.0
+    elif env_name == "Acrobot-v1":
+        s[4] /= (4 * np.pi)
+        s[5] /= (9 * np.pi)
+    return s
+
 
 def select_action(q_net, state, epsilon, action_dim):
     if random.random()<epsilon:
@@ -75,16 +81,19 @@ def select_action(q_net, state, epsilon, action_dim):
         return q_values.argmax(dim=1).item()
 
 def expected_q(q_net, next_state, epsilon, action_dim):
-    state_tensor=torch.FloatTensor(next_state).unsqueeze(0).to(DEVICE)
+    state_tensor = torch.FloatTensor(next_state).unsqueeze(0).to(DEVICE)
     with torch.no_grad():
-        q_vals=q_net(state_tensor).squeeze(0)
-    max_q=q_vals.max().item()
-    expected=0.0
+        q_vals = q_net(state_tensor).squeeze(0)
+    max_q = q_vals.max().item()
+    best_mask = (q_vals == max_q)
+    count_best = best_mask.sum().item()
+    expected = 0.0
     for a in range(action_dim):
-        prob=epsilon/action_dim
-        if q_vals[a].item()==max_q:
-            prob+=1-epsilon
-        expected+=prob*q_vals[a].item()
+        if best_mask[a]:
+            prob = epsilon / action_dim + (1 - epsilon) / count_best
+        else:
+            prob = epsilon / action_dim
+        expected += prob * q_vals[a].item()
     return expected
 
 def get_experiment_key(env_name, use_replay, epsilon, lr, method, seed):
@@ -179,14 +188,16 @@ def train_one_experiment(env_name, use_replay, epsilon, lr, method, seed):
                         if method=="q_learning":
                             next_q=q_net(next_states_b).max(1)[0].unsqueeze(1)
                             targets=rewards_b+GAMMA*next_q*(1-dones_b)
-                        elif method=="expected_sarsa":
-                            next_q_vals=q_net(next_states_b)
-                            max_q_vals, _=next_q_vals.max(dim=1, keepdim=True)
-                            probs=torch.ones_like(next_q_vals)*(epsilon/action_dim)
-                            best_action_mask=(next_q_vals==max_q_vals)
-                            probs[best_action_mask]+=1-epsilon
-                            exp_q=(next_q_vals*probs).sum(dim=1, keepdim=True)
-                            targets=rewards_b+GAMMA*exp_q*(1-dones_b)
+                        elif method == "expected_sarsa":
+                            next_q_vals = q_net(next_states_b)
+                            max_q_vals, _ = next_q_vals.max(dim=1, keepdim=True)
+                            best_mask = (next_q_vals == max_q_vals)
+                            count_best = best_mask.sum(dim=1, keepdim=True).float()
+                            probs = torch.ones_like(next_q_vals) * (epsilon / action_dim) + best_mask.float() * (
+                                        (1 - epsilon) / count_best)
+                            exp_q = (next_q_vals * probs).sum(dim=1, keepdim=True)
+                            targets = rewards_b + GAMMA * exp_q * (1 - dones_b)
+
                     loss=nn.MSELoss()(q_values, targets)
                     optimizer.zero_grad()
                     loss.backward()
