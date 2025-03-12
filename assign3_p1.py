@@ -26,10 +26,10 @@ GAMMA = 0.99
 REPLAY_BUFFER_CAPACITY = int(1e6)
 MINI_BATCH_SIZE = 64
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-ENV_NAMES = ["Acrobot-v1", "ALE/Assault-ram-v5"]
-USE_REPLAY_OPTIONS = [True, False]
-EPSILON_LIST = [1.0, 0.1, 0.01]
-LR_LIST = [0.001, 0.0001, 0.00001]
+ENV_NAMES = ["Acrobot-v1"]
+USE_REPLAY_OPTIONS = [False, True]
+EPSILON_LIST = [0.5, 0.1, 0.01]
+LR_LIST = [0.01, 0.001, 0.0001]
 METHODS = ["q_learning", "expected_sarsa"]
 
 class QNetwork(nn.Module):
@@ -62,14 +62,10 @@ class ReplayBuffer:
         return len(self.buffer)
 
 def preprocess_state(state, env_name):
-    s = np.array(state, dtype=np.float32)
-    if env_name == "ALE/Assault-ram-v5":
-        s = s / 255.0
-    elif env_name == "Acrobot-v1":
-        s[4] /= (4 * np.pi)
-        s[5] /= (9 * np.pi)
-    return s
-
+    if env_name=="ALE/Assault-ram-v5":
+        return np.array(state, dtype=np.float32)/255.0
+    else:
+        return np.array(state, dtype=np.float32)
 
 def select_action(q_net, state, epsilon, action_dim):
     if random.random()<epsilon:
@@ -81,19 +77,16 @@ def select_action(q_net, state, epsilon, action_dim):
         return q_values.argmax(dim=1).item()
 
 def expected_q(q_net, next_state, epsilon, action_dim):
-    state_tensor = torch.FloatTensor(next_state).unsqueeze(0).to(DEVICE)
+    state_tensor=torch.FloatTensor(next_state).unsqueeze(0).to(DEVICE)
     with torch.no_grad():
-        q_vals = q_net(state_tensor).squeeze(0)
-    max_q = q_vals.max().item()
-    best_mask = (q_vals == max_q)
-    count_best = best_mask.sum().item()
-    expected = 0.0
+        q_vals=q_net(state_tensor).squeeze(0)
+    max_q=q_vals.max().item()
+    expected=0.0
     for a in range(action_dim):
-        if best_mask[a]:
-            prob = epsilon / action_dim + (1 - epsilon) / count_best
-        else:
-            prob = epsilon / action_dim
-        expected += prob * q_vals[a].item()
+        prob=epsilon/action_dim
+        if q_vals[a].item()==max_q:
+            prob+=1-epsilon
+        expected+=prob*q_vals[a].item()
     return expected
 
 def get_experiment_key(env_name, use_replay, epsilon, lr, method, seed):
@@ -188,16 +181,14 @@ def train_one_experiment(env_name, use_replay, epsilon, lr, method, seed):
                         if method=="q_learning":
                             next_q=q_net(next_states_b).max(1)[0].unsqueeze(1)
                             targets=rewards_b+GAMMA*next_q*(1-dones_b)
-                        elif method == "expected_sarsa":
-                            next_q_vals = q_net(next_states_b)
-                            max_q_vals, _ = next_q_vals.max(dim=1, keepdim=True)
-                            best_mask = (next_q_vals == max_q_vals)
-                            count_best = best_mask.sum(dim=1, keepdim=True).float()
-                            probs = torch.ones_like(next_q_vals) * (epsilon / action_dim) + best_mask.float() * (
-                                        (1 - epsilon) / count_best)
-                            exp_q = (next_q_vals * probs).sum(dim=1, keepdim=True)
-                            targets = rewards_b + GAMMA * exp_q * (1 - dones_b)
-
+                        elif method=="expected_sarsa":
+                            next_q_vals=q_net(next_states_b)
+                            max_q_vals, _=next_q_vals.max(dim=1, keepdim=True)
+                            probs=torch.ones_like(next_q_vals)*(epsilon/action_dim)
+                            best_action_mask=(next_q_vals==max_q_vals)
+                            probs[best_action_mask]+=1-epsilon
+                            exp_q=(next_q_vals*probs).sum(dim=1, keepdim=True)
+                            targets=rewards_b+GAMMA*exp_q*(1-dones_b)
                     loss=nn.MSELoss()(q_values, targets)
                     optimizer.zero_grad()
                     loss.backward()
@@ -244,7 +235,7 @@ def generate_experiment_list():
     return exp_list
 
 parser=argparse.ArgumentParser()
-parser.add_argument("--mode", choices=["train", "continue", "plot"], required=True)
+parser.add_argument("--mode", choices=["train", "continue", "plot", "save"], required=True)
 args=parser.parse_args()
 if args.mode=="train":
     exp_list=generate_experiment_list()
@@ -296,8 +287,44 @@ elif args.mode == "plot":
                     plt.legend()
                     plt.grid(True)
                     plt.show()
-
-
+elif args.mode == "save":
+    results_dict = load_results()
+    def pad_run(run, target_length):
+        if len(run) < target_length:
+            run = run + [run[-1]] * (target_length - len(run))
+        return run
+    for env_name in ENV_NAMES:
+        for use_replay in USE_REPLAY_OPTIONS:
+            fig, axes = plt.subplots(nrows=len(EPSILON_LIST), ncols=len(LR_LIST), figsize=(15, 12), sharex=True, sharey=True)
+            for i, eps in enumerate(EPSILON_LIST):
+                for j, lr in enumerate(LR_LIST):
+                    ax = axes[i, j]
+                    for method, color, ls in zip(METHODS, ['green', 'red'], ['solid', 'dashed']):
+                        all_runs = []
+                        for seed in range(NUM_SEEDS):
+                            exp_key = get_experiment_key(env_name, use_replay, eps, lr, method, seed)
+                            if exp_key in results_dict:
+                                run = results_dict[exp_key]
+                                run = pad_run(run, NUM_EPISODES)
+                                all_runs.append(np.array(run))
+                        if len(all_runs) > 0:
+                            all_runs = np.stack(all_runs)
+                            mean_rewards = all_runs.mean(axis=0)
+                            std_rewards = all_runs.std(axis=0)
+                            episodes = np.arange(1, NUM_EPISODES + 1)
+                            ax.plot(episodes, mean_rewards, label=f"{method}", color=color, linestyle=ls)
+                            ax.fill_between(episodes, mean_rewards - std_rewards, mean_rewards + std_rewards, color=color, alpha=0.2)
+                    ax.set_title(f"ε={eps}, lr={lr}")
+                    ax.grid(True)
+                    if i == len(EPSILON_LIST) - 1:
+                        ax.set_xlabel("Episode")
+                    if j == 0:
+                        ax.set_ylabel("Total Reward")
+            fig.suptitle(f"{env_name} | {'With Replay Buffer' if use_replay else 'Without Replay Buffer'}", fontsize=16)
+            fig.tight_layout(rect=[0, 0, 1, 0.95])
+            filename = f"{env_name}_{'replay' if use_replay else 'noreplay'}_combined.png"
+            plt.savefig(filename)
+            plt.close()
 
 
 
